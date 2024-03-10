@@ -1,16 +1,16 @@
 package main
 
 import (
-	"database/sql"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/bytedance/sonic"
 	"github.com/gofiber/fiber/v2"
-
-	_ "github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type TransactionPayload struct {
@@ -23,14 +23,18 @@ func main() {
 	port := os.Getenv("PORT")
 	dsn := os.Getenv("DATABASE_URL")
 
-	db, err := sql.Open("postgres", dsn)
+	if port == "" {
+		port = "9999"
+	}
+	if dsn == "" {
+		dsn = "postgresql://postgres:postgres@localhost:5432/rinha?sslmode=disable"
+	}
+
+	dbpool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		log.Fatal("failed to open => ", err)
 	}
-
-	if err := db.Ping(); err != nil {
-		log.Fatal("failed to ping => ", err)
-	}
+	defer dbpool.Close()
 
 	app := fiber.New(fiber.Config{
 		JSONEncoder: sonic.Marshal,
@@ -42,21 +46,32 @@ func main() {
 
 		// Funciona né K
 		if err != nil || id <= 0 || id > 5 {
-			log.Println("Id param", err)
 			return c.Status(404).SendString("Cliente não encontrado")
 		}
 
 		var body TransactionPayload
 		if err := c.BodyParser(&body); err != nil {
-			log.Println("Body parser", err)
 			return c.Status(400).SendString("Erro ao processar o corpo requisição")
 		}
 
-		row := db.QueryRow("select * from create_transaction($1, $2, $3, $4)", id, body.Value, body.Type, body.Description)
+		if body.Description == "" || len(body.Description) > 10 {
+			return c.Status(422).SendString("Descrição inválida")
+		}
+
+		if body.Type != "c" && body.Type != "d" {
+			return c.Status(422).SendString("Tipo inválido")
+		}
 
 		var response json.RawMessage
-		if err := row.Scan(&response); err != nil {
-			log.Println("Scan err", err)
+		err = dbpool.QueryRow(context.Background(), "select * from create_transaction($1, $2, $3, $4)", id, body.Value, body.Type, body.Description).Scan(&response)
+
+		if err != nil {
+			if strings.Contains(err.Error(), "clients_balance_check") {
+				return c.Status(422).SendString("Valor inválido")
+			}
+
+			log.Println("Erro processando transação", err, body)
+
 			return c.Status(400).SendString("Erro ao processar a resposta da requisição ao banco")
 		}
 
@@ -68,19 +83,26 @@ func main() {
 
 		// Funciona né K
 		if err != nil || id <= 0 || id > 5 {
-			log.Println("Id param", err)
+			log.Println("Id param", id, err)
 			return c.Status(404).SendString("Cliente não encontrado")
 		}
 
-		row := db.QueryRow("select * from get_extract($1)", id)
-
 		var response json.RawMessage
-		if err := row.Scan(&response); err != nil {
+		if err := dbpool.QueryRow(context.Background(), "select * from get_extract($1)", id).Scan(&response); err != nil {
 			log.Println("Scan err", err)
 			return c.Status(400).SendString("Erro ao processar a resposta da requisição ao banco")
 		}
 
 		return c.Status(200).Send(response)
+	})
+
+	app.Get("/reset", func(c *fiber.Ctx) error {
+		if _, err := dbpool.Exec(context.Background(), "select reset_data()"); err != nil {
+			log.Println("Scan err", err)
+			return c.Status(400).SendString("Erro ao processar a resposta da requisição ao banco")
+		}
+
+		return c.Status(200).SendString("Resetado")
 	})
 
 	app.Listen(fmt.Sprintf(":%s", port))
