@@ -54,6 +54,10 @@ func main() {
 			return c.Status(400).SendString("Erro ao processar o corpo requisição")
 		}
 
+		if body.Value < 1 {
+			return c.Status(422).SendString("Valor inválido")
+		}
+
 		if body.Description == "" || len(body.Description) > 10 {
 			return c.Status(422).SendString("Descrição inválida")
 		}
